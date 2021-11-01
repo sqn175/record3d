@@ -2,6 +2,10 @@
 #include <vector>
 #include <record3d/Record3DStream.h>
 #include <mutex>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <cmath>
 
 #ifdef HAS_OPENCV
 #include <opencv2/opencv.hpp>
@@ -19,6 +23,18 @@ using namespace std;
 class Record3DDemoApp
 {
 public:
+    Record3DDemoApp(const std::string& base_path_string)
+    {
+        const auto p1 = std::chrono::system_clock::now();
+        auto time = std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count();
+        path_str_ = base_path_string + "/" + std::to_string(time) + "/";
+        std::cout << "Dataset save path: " << path_str_ << std::endl;
+        const std::filesystem::path path{path_str_};
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path/"rgbd");
+        std::filesystem::create_directories(path/"depth");
+    }
+
     void Run()
     {
         Record3D::Record3DStream stream{};
@@ -118,6 +134,14 @@ private:
     {
         currentDeviceType_ = (Record3D::DeviceType) $deviceType;
 
+        if (!intrinsic_matrix_saved_)
+        {
+            std::ofstream calib(path_str_ + "calibration.txt", std::ofstream::out);
+            calib << $K.fx << " " << $K.fy << " " << $K.tx << " " << $K.ty; 
+            calib.close();
+            intrinsic_matrix_saved_ = true;
+        }
+
 #ifdef HAS_OPENCV
         std::lock_guard<std::recursive_mutex> lock(mainThreadLock_);
         // When we switch between the TrueDepth and the LiDAR camera, the size frame size changes.
@@ -136,13 +160,33 @@ private:
         constexpr int numRGBChannels = 3;
         memcpy( imgRGB_.data, $rgbFrame.data(), $rgbWidth * $rgbHeight * numRGBChannels * sizeof(uint8_t));
         memcpy( imgDepth_.data, $depthFrame.data(), $depthWidth * $depthHeight * sizeof(float));
+
+        // Save images
+        // Save depth map as ETH3D dataset described.
+        cv::Mat imgScaledDepth($depthHeight, $depthWidth, CV_16U);
+        for (int i = 0; i < imgDepth_.rows; ++i)
+        {
+            for (int j = 0; j < imgDepth_.cols; ++j)
+            {
+                imgScaledDepth.at<uint16_t>(i,j) = std::round(imgDepth_.at<float>(i,j)*5000);
+            }
+        }
+        const auto p1 = std::chrono::system_clock::now();
+        auto time = std::chrono::duration_cast<std::chrono::microseconds>(p1.time_since_epoch()).count();
+        const std::string file_name = std::to_string(time / 1000000) + "." + std::to_string(time % 1000000) + ".png";
+        if (!(cv::imwrite(path_str_ + "rgb/" + file_name, imgRGB_) && cv::imwrite(path_str_ + "depth/" + file_name, imgScaledDepth)))
+        {
+            std::cout << "Saving image failed!" << std::endl;
+        }
 #endif
     }
 
 private:
     std::recursive_mutex mainThreadLock_{};
     Record3D::DeviceType currentDeviceType_{};
-
+    std::string path_str_{"./"};
+    bool intrinsic_matrix_saved_ = false;
+    
 #ifdef HAS_OPENCV
     cv::Mat imgRGB_{};
     cv::Mat imgDepth_{};
@@ -150,9 +194,10 @@ private:
 };
 
 
-int main()
+int main(int argc, char** argv)
 {
-    Record3DDemoApp app{};
+    std::string base_path_string = argc > 1 ? std::string{argv[1]} : "./";
+    Record3DDemoApp app(base_path_string);
     app.Run();
 }
 
